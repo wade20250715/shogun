@@ -1,84 +1,163 @@
-# Shogun 将军
+# Shogun
 
-> 将军家老足轻 — 轻量级多Agent文件系统协作调度器
+> Lightweight multi-agent filesystem collaboration scheduler.
 
-两个独立部署的AI Agent，一个Python一个Node.js，没有共享内存，没有消息队列——就靠JSON文件和约定协作了好几个月。
+Two independently deployed AI Agents — one Python, one Node.js. No shared memory, no message queue, no RPC. They coordinate through JSON files and shared conventions.
 
-这就是Shogun的实战验证。
+That is what Shogun enables.
 
-## 为什么需要Shogun
+## Why Shogun
 
-多Agent框架很多（LangGraph、CrewAI、AutoGen），但它们都假设Agent在同一个进程里，或通过同一套API通信。
+Multi-agent frameworks exist (LangGraph, CrewAI, AutoGen), but they assume agents live in the same process or talk through the same API.
 
-实际场景是：你有一个跑在飞书上的Python Agent（Hermes），一个跑在微信上的Node.js Agent（OpenClaw），两个都无法直接调对方的代码。你需要一套**零依赖、纯文件系统、任何语言都能用**的协作协议。
+Reality is messier. You might have a Python agent on Lark and a Node.js agent on Discord. Neither can call the other's code directly. You need a **zero-dependency, filesystem-native, language-agnostic** collaboration protocol.
 
-Shogun就是干这个的。
+Shogun is that protocol, packaged as a Python scheduler.
 
-## 三层模型
+## Three-Layer Model
 
 ```
-将军层 → 人类 + 主Agent（决策/验收/放任务）
-  ↓ 文件系统
-家老层 → 辅助Agent（领任务/调工具/交活）
-  ↓ 子进程
-足轻层 → 脚本/CrewAI/API（重体力活）
+Commander  → Human + Lead Agent (decide, review, dispatch tasks)
+    ↓  filesystem
+Retainer   → Worker Agent (claim tasks, use tools, report back)
+    ↓  subprocess / API
+Foot Soldier → Scripts / Crews (heavy computation)
 ```
 
-## 核心能力
+## What It Does
 
-- 启动自检：读共享上下文 → 读武器库 → 扫描待领任务
-- 管线路由：输入"地黄饮子PPI网络图"，自动匹配pharma管线14个工具
-- 任务队列：PENDING→ACTIVE→DONE 状态机，全程文件追踪
-- 工具注册：JSON驱动，新工具加一行自动感知，5条管线50个工具已验证
+- **Boot self-check**: reads shared context, loads tool registry, scans pending tasks
+- **Pipeline routing**: task description → keyword match → pipeline → matched tool list. Keywords are user-defined in `tool_registry.json` — the framework ships with zero domain knowledge.
+- **Task queue**: PENDING → ACTIVE → DONE state machine, fully file-tracked
+- **Tool registry**: JSON-driven. Add a tool entry, all pipelines auto-detect it.
+- **Whiteboard**: append-only collaboration log via `AGENT_COLLAB.md`
 
-## 安装
+## Install
 
 ```bash
 pip install shogun-agent
 ```
 
-## 三分钟上手
+## Quick Start
+
+### 1. Create a workspace
+
+```bash
+mkdir my-workspace
+cd my-workspace
+```
+
+### 2. Define your tool registry
+
+Create `tool_registry.json`:
+
+```json
+{
+  "pipelines": {
+    "images": {
+      "description": "Image processing",
+      "keywords": ["resize", "crop", "filter", "convert", "png", "jpg"]
+    },
+    "data": {
+      "description": "Data analysis",
+      "keywords": ["csv", "plot", "chart", "statistics", "pandas"]
+    }
+  },
+  "tools": {
+    "pillow": {
+      "type": "pip",
+      "description": "Image manipulation",
+      "pipelines": ["images"]
+    },
+    "pandas": {
+      "type": "pip",
+      "description": "Data analysis library",
+      "pipelines": ["data"]
+    },
+    "matplotlib": {
+      "type": "pip",
+      "description": "Chart plotting",
+      "pipelines": ["images", "data"]
+    }
+  }
+}
+```
+
+### 3. Use the scheduler
 
 ```python
 from shogun import Shogun
 
-sg = Shogun(root_dir="./workspace")
+sg = Shogun(root_dir="./my-workspace")
 sg.startup()
 
-# 创建任务
-task_id = sg.create_task(
-    title="调整PPI网络图配色",
-    description="地黄饮子PPI网络图的节点颜色太暗，换Nature配色",
-    assigned_to="openclaw"
-)
-# → 自动匹配pharma管线，附带14个可用工具
+# Pipeline routing auto-detects the right toolset
+print(sg.route_pipeline("resize product photos to 800x600"))
+# → "images"
 
-# Agent领取
+# Create a task — tools are auto-matched
+task_id = sg.create_task(
+    title="Resize product images",
+    description="Batch resize all product photos to 800x600 PNG",
+    assigned_to="worker-agent"
+)
+
+# Worker claims it
 task = sg.claim_task(task_id)
 
-# Agent完成
-sg.complete_task(task_id, result="已用matplotlib重绘，300DPI，Nature配色")
+# Worker completes it
+sg.complete_task(task_id, result="Done. 47 images resized.")
+
+# Check status
+print(sg.status())
+# → {'pipeline': 'images', 'tools_loaded': 3, 'pending': 0, 'active': 0, 'done': 1}
 ```
 
-## 跟其他框架的区别
+## How Pipeline Routing Works
 
-| 特性 | Shogun | LangGraph | CrewAI |
-|------|--------|-----------|--------|
-| 通信方式 | JSON文件 | Python对象 | 进程内 |
-| 跨语言 | ✅ 任意 | ❌ Python only | ❌ Python only |
-| 零依赖 | ✅ stdlib | ❌ | ❌ |
-| 管线路由 | ✅ 关键词匹配 | 手动 | 手动 |
-| 状态机 | PENDING→ACTIVE→DONE | 自定义 | 内置 |
-| 生产验证 | ✅ 双Agent 2个月 | ✅ | ✅ |
+1. You define pipelines with keywords in `tool_registry.json`
+2. `route_pipeline()` scans the task description against all keyword sets
+3. Highest keyword match wins
+4. No match → falls back to `"general"`
 
-## 设计哲学
+The framework has **no built-in keywords**. Zero domain knowledge. Your tool registry IS the configuration.
 
-控制工程的闭环反馈：
+## Comparison
 
-- 传感器层 → Hook检测（文件变化、定时扫描）
-- 控制器层 → 决策逻辑（管线路由、工具匹配）
-- 执行器层 → 工具调用（50工具5管线）
-- 反馈层 → 审计追踪（任务队列+白板留言）
+| Feature | Shogun | LangGraph | CrewAI |
+|---------|--------|-----------|--------|
+| Communication | JSON files | Python objects | In-process |
+| Cross-language | Any language | Python only | Python only |
+| Dependencies | stdlib only | Heavy | Heavy |
+| Pipeline routing | Keyword-driven | Manual | Manual |
+| State machine | PENDING→ACTIVE→DONE | Custom | Built-in |
+| Domain knowledge | Zero (user-defined) | N/A | N/A |
+
+## Control-Engineering Philosophy
+
+- **Sensor** → Hook detection (file changes, timed scans)
+- **Controller** → Decision logic (pipeline routing, tool matching)
+- **Actuator** → Tool execution (subprocess, API calls)
+- **Feedback** → Audit trail (task queue + whiteboard)
+
+## File Structure
+
+```
+workspace/
+  SHARED_CONTEXT.md      ← shared context (read by all agents)
+  tool_registry.json     ← pipeline + tool definitions
+  HOOKS.md               ← trigger rules
+  AGENT_COLLAB.md        ← whiteboard messages
+  tasks/
+    PENDING/             ← unclaimed tasks
+    ACTIVE/              ← in-progress
+    DONE/                ← completed
+```
+
+## Requirements
+
+- Python ≥ 3.10
+- No external dependencies (stdlib only)
 
 ## License
 

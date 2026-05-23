@@ -1,100 +1,113 @@
-# Shogun 设计文档
+# Shogun Design Document
 
-## 问题定义
+## Problem
 
-两个独立AI Agent（Python/Node.js）在同一台Windows机器上，需要协作完成生物信息学分析、游戏开发、论文写作等多类任务。双方无法直接调用对方代码，只能通过文件系统通信。
+Two independent AI agents (Python / Node.js) on the same machine need to collaborate on multi-step projects. Neither can call the other's code directly. The only shared resource: a filesystem.
 
-## 设计原则
+Existing multi-agent frameworks (LangGraph, CrewAI, AutoGen) assume in-process or API-based communication. They do not solve the **cross-language, filesystem-only** case.
 
-1. 零外部依赖 — Python标准库only，Node.js只读JSON
-2. 启动自愈 — Agent重启后读文件恢复状态，不依赖记忆
-3. 管线隔离 — 不同项目工具互不污染
-4. 审计可追踪 — 每个任务从创建到完成全程文件留痕
+Shogun solves this with a minimal protocol backed by JSON files and conventions.
 
-## 三层协作模型
+## Design Principles
 
-### 将军层（Commander）
-- 角色：人类 + Hermes Agent
-- 职责：决策方向、创建任务、验收结果
-- 输入：人类自然语言指令
-- 输出：tasks/PENDING/*.json
+1. **Zero external dependencies** — Python stdlib only. Node.js side reads plain JSON.
+2. **Boot-time self-recovery** — agent restarts recover state from files, not in-memory.
+3. **Pipeline isolation** — different project domains use separate tool sets, no cross-contamination.
+4. **Full audit trail** — every task from creation to completion leaves file-level breadcrumbs.
 
-### 家老层（Retainer）
-- 角色：OpenClaw Agent（或其他辅助Agent）
-- 职责：启动自检、领取任务、调用工具、汇报结果
-- 输入：SHARED_CONTEXT.md + tool_registry.json + tasks/PENDING/
-- 输出：tasks/DONE/*.json + AGENT_COLLAB.md留言
+## Three-Layer Collaboration Model
 
-### 足轻层（Foot Soldier）
-- 角色：CrewAI / Python脚本 / MAMMAL API / pipeline.py
-- 职责：重计算任务
-- 调用方式：subprocess / API call
+### Commander Layer
+- **Who**: Human + Lead Agent
+- **Responsibility**: Decide direction, create tasks, review results
+- **Input**: Natural language from human
+- **Output**: `tasks/PENDING/*.json`
 
-## 管线路由引擎
+### Retainer Layer
+- **Who**: Worker Agent (any language runtime)
+- **Responsibility**: Self-check on boot, claim tasks, invoke tools, report results
+- **Input**: `SHARED_CONTEXT.md` + `tool_registry.json` + `tasks/PENDING/`
+- **Output**: `tasks/DONE/*.json` + entries on `AGENT_COLLAB.md`
 
-任务描述 → 关键词匹配 → 管线ID → 工具列表
+### Foot Soldier Layer
+- **Who**: Scripts, CrewAI, APIs, subprocess calls
+- **Responsibility**: Heavy computation
+- **Invocation**: subprocess / HTTP API / CLI
 
-```python
-PIPELINE_KEYWORDS = {
-    "pharma": ["网药", "PPI", "KEGG", "对接", "地黄饮子"],
-    "nano": ["纳米", "脂质体", "BBB", "PLGA"],
-    "game": ["游戏", "Blender", "3D", "素材"],
-    "paper": ["论文", "PDF", "翻译", "参考文献"],
-}
-```
+## Pipeline Routing Engine
 
-匹配算法：遍历管线关键词，统计命中数，取最高分。无命中→general。
+Task description → keyword matching → pipeline ID → tool list.
 
-## 工具注册中心
+### How it works
+
+Pipelines are defined entirely by the user in `tool_registry.json`:
 
 ```json
 {
-  "tools": {
-    "rdkit": {
-      "type": "pip",
-      "description": "化学信息学 - 分子对接",
-      "pipelines": ["pharma", "nano"]
+  "pipelines": {
+    "docs": {
+      "description": "Document generation",
+      "keywords": ["report", "pdf", "markdown", "latex"]
     }
   }
 }
 ```
 
-新增工具：复制模板填一行JSON，所有管线自动感知。
+Match algorithm: iterate all pipeline keyword sets, count hits in task description, take the highest score. No hits → `"general"`.
 
-## Hook引擎
+**The framework has zero built-in keywords.** Every pipeline and every keyword is user-defined.
 
-- 启动Hook：读SHARED_CONTEXT.md → 读tool_registry.json → 扫描PENDING
-- 定时Hook：每4小时扫描PENDING（兜底启动Hook失败）
-- 工具Hook：说"做不到"之前强制读tool_registry.json
-- 代理Hook：测速<阈值→自动截屏→百练视觉定位→pyautogui切节点
+## Tool Registry
 
-## 文件结构
+```json
+{
+  "tools": {
+    "pandoc": {
+      "type": "cli",
+      "description": "Document converter",
+      "pipelines": ["docs"]
+    }
+  }
+}
+```
+
+Adding a tool: copy the template, fill one JSON entry. All pipelines auto-detect it.
+
+## Hook Engine
+
+- **Boot hook**: load shared context → load registry → scan PENDING
+- **Periodic hook**: scan PENDING every N hours (fallback if boot hook missed something)
+- **Tool hook**: before saying "I can't do this", re-read registry
+- **Custom hooks**: user-defined trigger rules in `HOOKS.md`
+
+## File Structure
 
 ```
 workspace/
-  SHARED_CONTEXT.md       # 共享上下文（军议）
-  START_HERE.md           # Agent启动入口
-  HOOKS.md                # 触发规则
-  tool_registry.json      # 武器库
-  AGENT_COLLAB.md         # 白板留言
+  SHARED_CONTEXT.md       # Shared context (mission briefing)
+  tool_registry.json      # Pipeline + tool definitions
+  HOOKS.md                # Trigger rules
+  AGENT_COLLAB.md         # Whiteboard
   tasks/
-    PENDING/              # 待领任务
-    ACTIVE/               # 进行中
-    DONE/                 # 已完成
+    PENDING/              # Unclaimed tasks
+    ACTIVE/               # In progress
+    DONE/                 # Completed
 ```
 
-## 与Harness Engineering的关系
+## Relationship to Harness Engineering
 
-Shogun是Harness Engineering思想在"双Agent文件系统协作"场景的具体实现。借鉴了OpenHarness的工具使用和审计追踪概念，但设计上针对：
+Shogun applies Harness Engineering principles to the specific scenario of **cross-language, filesystem-based multi-agent collaboration**:
 
-- 跨语言Agent（Python + Node.js）
-- 文件系统通信（非网络RPC）
-- 中小规模协作（2-5个Agent）
-- Windows生产环境
+- **Sensor** ↔ Hook detection (file watchers, periodic scans)
+- **Controller** ↔ Decision logic (pipeline routing, tool matching)
+- **Actuator** ↔ Tool execution (subprocess, API calls)
+- **Feedback** ↔ Audit trail (task queue state machine + whiteboard)
 
-## 未来方向
+Where frameworks like OpenHarness focus on benchmark evaluation and model comparison, Shogun focuses on operational coordination between independently deployed agents.
 
-- Web Dashboard可视化任务队列
-- MCP协议集成（让外部工具通过MCP接入Shogun）
-- Agent自愈（自动重启歇逼的Agent）
-- 多机协作（网络文件系统共享）
+## Future Directions
+
+- Web dashboard for task queue visualization
+- MCP protocol integration (external tools via MCP → Shogun)
+- Agent heartbeat monitoring
+- Multi-workspace federation
